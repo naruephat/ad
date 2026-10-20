@@ -4,6 +4,8 @@ import { INITIAL_TEACHERS } from '../data/initialTeachers';
 const STORAGE_KEY_CF_CONFIG = 'lp_cloudflare_config';
 const STORAGE_KEY_DB_PROVIDER = 'lp_database_provider'; // 'cloudflare' | 'supabase' | 'local'
 
+export const DEFAULT_CLOUDFLARE_WORKER_URL = 'https://pcshs-eduplan-db.naruephat-na.workers.dev';
+
 export type DatabaseProvider = 'cloudflare' | 'supabase' | 'local';
 
 export interface CloudflareSettings {
@@ -34,11 +36,8 @@ export function getDatabaseProvider(): DatabaseProvider {
   if (envProvider === 'cloudflare') return 'cloudflare';
   if (envProvider === 'supabase') return 'supabase';
 
-  // Auto-detect based on configured credentials
-  const cf = getSavedCloudflareConfig();
-  if (cf.workerUrl) return 'cloudflare';
-
-  return 'supabase';
+  // Default to Cloudflare as primary database provider
+  return 'cloudflare';
 }
 
 export function setDatabaseProvider(provider: DatabaseProvider) {
@@ -50,7 +49,7 @@ export function getSavedCloudflareConfig(): CloudflareSettings {
   const envUrl = sanitizeCloudflareUrl(
     metaEnv.VITE_CLOUDFLARE_WORKER_URL ||
     metaEnv.CLOUDFLARE_WORKER_URL ||
-    ''
+    DEFAULT_CLOUDFLARE_WORKER_URL
   );
   const envKey = (metaEnv.VITE_CLOUDFLARE_API_KEY || metaEnv.CLOUDFLARE_API_KEY || '').trim();
 
@@ -59,7 +58,7 @@ export function getSavedCloudflareConfig(): CloudflareSettings {
     try {
       const parsed = JSON.parse(saved);
       return {
-        workerUrl: sanitizeCloudflareUrl(parsed.workerUrl || envUrl),
+        workerUrl: sanitizeCloudflareUrl(parsed.workerUrl) || envUrl,
         apiKey: parsed.apiKey || envKey,
         accountId: parsed.accountId || '',
         databaseId: parsed.databaseId || '',
