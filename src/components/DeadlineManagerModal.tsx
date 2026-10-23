@@ -6,6 +6,7 @@ import {
   LessonPlan,
   Teacher,
   DynamicFormField,
+  isTeacherAdmin,
 } from '../types';
 import { DynamicFormBuilder } from './DynamicFormBuilder';
 import {
@@ -16,11 +17,14 @@ import {
   constructDateTime,
   DEFAULT_DEADLINE_CONFIGS,
   DEFAULT_STATUS_CONFIGS,
+  buildGmailComposeUrl,
+  buildMailtoUrl,
 } from '../utils/deadlineUtils';
 import {
   SYSTEM_SETTINGS_TABLE_SQL,
   checkSystemSettingsTableStatus,
   seedDocumentTypesToSupabase,
+  saveSystemSetting,
 } from '../services/supabaseClient';
 import {
   X,
@@ -50,7 +54,13 @@ import {
   FileJson,
   Award,
   List,
+  Link as LinkIcon,
+  Mail,
+  Send,
+  Loader2,
+  Zap,
 } from 'lucide-react';
+import { openGmailComposeTab } from '../services/emailService';
 
 interface DeadlineManagerModalProps {
   isOpen: boolean;
@@ -63,6 +73,7 @@ interface DeadlineManagerModalProps {
   onUpdatePlanStatus?: (planId: string, newStatus: string, isLate?: boolean, adminNotes?: string) => Promise<void> | void;
   isSupabaseConnected?: boolean;
   currentTeacher?: Teacher | null;
+  teachers?: Teacher[];
 }
 
 const COLOR_OPTIONS: { id: StatusColor; name: string; bg: string }[] = [
@@ -87,8 +98,24 @@ export const DeadlineManagerModal: React.FC<DeadlineManagerModalProps> = ({
   onUpdatePlanStatus,
   isSupabaseConnected,
   currentTeacher,
+  teachers = [],
 }) => {
   const [activeTab, setActiveTab] = useState<'deadlines' | 'statuses' | 'plans'>('deadlines');
+
+  // Broadcast email state
+  const [broadcastConfig, setBroadcastConfig] = useState<PlanTypeDeadlineConfig | null>(null);
+  const [broadcastCopied, setBroadcastCopied] = useState<boolean>(false);
+  const [isBroadcastingEmail, setIsBroadcastingEmail] = useState<boolean>(false);
+  const [broadcastSuccessMsg, setBroadcastSuccessMsg] = useState<string | null>(null);
+
+  // Teaching staff for email notifications
+  const teachingStaff = React.useMemo(() => {
+    return (teachers || []).filter((t) => !isTeacherAdmin(t));
+  }, [teachers]);
+
+  const teacherEmails = React.useMemo(() => {
+    return teachingStaff.map((t) => t.Email).filter(Boolean);
+  }, [teachingStaff]);
 
   // Deadlines state
   const [deadlines, setDeadlines] = useState<PlanTypeDeadlineConfig[]>([...deadlineConfigs]);
@@ -241,27 +268,27 @@ export const DeadlineManagerModal: React.FC<DeadlineManagerModalProps> = ({
 
   if (!isOpen) return null;
 
-  // Save deadlines with automatic instant update to SQL (Supabase)
+  // Save deadlines with automatic instant update to Cloudflare D1
   const handleSaveDeadlines = async (updatedList: PlanTypeDeadlineConfig[]) => {
     setDeadlines(updatedList);
     onSaveDeadlineConfigs(updatedList);
 
-    // Auto-update to SQL (Supabase) immediately
+    // Auto-update to Cloudflare D1 immediately
     if (isSupabaseConnected) {
       try {
         const res = await seedDocumentTypesToSupabase(updatedList);
         if (res.success) {
           setSyncCloudNotice(
-            `⚡ อัปเดตเข้า SQL อัตโนมัติเรียบร้อยแล้ว! (${updatedList.length} ประเภทเอกสาร) เครื่องอื่นเห็นข้อมูลทันที`
+            `⚡ อัปเดตเข้า Cloudflare D1 เรียบร้อยแล้ว! (${updatedList.length} ประเภทเอกสาร) เครื่องอื่นเห็นข้อมูลทันที`
           );
           setTableStatus({ checked: true, exists: true });
         } else {
           setSyncCloudNotice(
-            `⚠️ บันทึกลงเครื่องแล้ว แต่ส่งไป SQL ไม่สำเร็จ: ${res.error || 'กรุณารันคำสั่งสร้างตาราง system_settings'}`
+            `⚠️ บันทึกลงเครื่องแล้ว แต่ส่งไป Cloudflare D1 ไม่สำเร็จ: ${res.error || 'โปรดตรวจสอบการเชื่อมต่อ Worker'}`
           );
         }
       } catch (err: any) {
-        setSyncCloudNotice(`⚠️ เกิดข้อผิดพลาดขณะส่งเข้า SQL: ${err?.message}`);
+        setSyncCloudNotice(`⚠️ เกิดข้อผิดพลาดขณะส่งเข้า Cloudflare: ${err?.message}`);
       }
     } else {
       setSyncCloudNotice(
@@ -290,6 +317,12 @@ export const DeadlineManagerModal: React.FC<DeadlineManagerModalProps> = ({
       is_active: newDeadline.is_active ?? true,
       evaluation_type: newDeadline.evaluation_type || 'rubric_score',
       notes: newDeadline.notes?.trim() || '',
+      sample_url: newDeadline.sample_url?.trim() || undefined,
+      sample_title: newDeadline.sample_title?.trim() || undefined,
+      example_documents:
+        newDeadline.example_documents && newDeadline.example_documents.length > 0
+          ? newDeadline.example_documents.filter((d) => d.url?.trim())
+          : undefined,
       fields:
         useCustomFormForNew && newDeadline.fields && newDeadline.fields.length > 0
           ? newDeadline.fields
@@ -313,8 +346,13 @@ export const DeadlineManagerModal: React.FC<DeadlineManagerModalProps> = ({
       evaluation_type: 'rubric_score',
       notes: '',
       fields: [],
+      sample_url: '',
+      sample_title: '',
+      example_documents: [],
     });
     await handleSaveDeadlines(nextList);
+    // Auto-prompt admin to notify all teachers via email
+    setBroadcastConfig(item);
   };
 
   const handleDeleteDeadline = async (id: string) => {
@@ -332,9 +370,16 @@ export const DeadlineManagerModal: React.FC<DeadlineManagerModalProps> = ({
   };
 
   // Status management
-  const handleSaveStatuses = (updatedList: PlanStatusConfig[]) => {
+  const handleSaveStatuses = async (updatedList: PlanStatusConfig[]) => {
     setStatuses(updatedList);
     onSaveStatusConfigs(updatedList);
+    if (isSupabaseConnected) {
+      try {
+        await saveSystemSetting('status_configs', updatedList);
+      } catch (err: any) {
+        console.warn('Could not auto-save status_configs to cloud:', err);
+      }
+    }
   };
 
   const handleAddNewStatus = (e: React.FormEvent) => {
@@ -1012,7 +1057,7 @@ export const DeadlineManagerModal: React.FC<DeadlineManagerModalProps> = ({
                       </label>
                     </div>
 
-                    {useCustomFormForNew && (
+                    {useCustomFormForNew ? (
                       <div className="pt-2">
                         <DynamicFormBuilder
                           fields={newDeadline.fields || []}
@@ -1021,7 +1066,43 @@ export const DeadlineManagerModal: React.FC<DeadlineManagerModalProps> = ({
                           }
                           availableTemplates={deadlines}
                           currentTeacher={currentTeacher}
+                          sampleUrl={newDeadline.sample_url || ''}
+                          sampleTitle={newDeadline.sample_title || ''}
+                          exampleDocuments={newDeadline.example_documents || []}
+                          onSampleDocumentsChange={(sampleData) =>
+                            setNewDeadline({ ...newDeadline, ...sampleData })
+                          }
                         />
+                      </div>
+                    ) : (
+                      <div className="bg-sky-50/70 p-3.5 rounded-xl border border-sky-200/90 space-y-2.5">
+                        <div className="flex items-center justify-between">
+                          <span className="text-xs font-bold text-sky-950 flex items-center gap-1.5">
+                            <LinkIcon className="w-3.5 h-3.5 text-sky-600" />
+                            <span>แปะลิงก์เอกสารตัวอย่าง / แบบฟอร์มต้นแบบ (เผื่อครูอยากดูตัวอย่างก่อนส่ง)</span>
+                          </span>
+                          <span className="text-[10px] text-sky-700">Google Docs, PDF, หรือ Drive</span>
+                        </div>
+                        <div className="grid grid-cols-1 sm:grid-cols-12 gap-2 text-xs">
+                          <div className="sm:col-span-5">
+                            <input
+                              type="text"
+                              value={newDeadline.sample_title || ''}
+                              onChange={(e) => setNewDeadline({ ...newDeadline, sample_title: e.target.value })}
+                              placeholder="ชื่อตัวอย่าง เช่น แบบฟอร์มแผนการสอน (Google Docs)"
+                              className="w-full px-3 py-1.5 border border-sky-300 rounded-lg text-xs bg-white text-slate-800"
+                            />
+                          </div>
+                          <div className="sm:col-span-7">
+                            <input
+                              type="url"
+                              value={newDeadline.sample_url || ''}
+                              onChange={(e) => setNewDeadline({ ...newDeadline, sample_url: e.target.value })}
+                              placeholder="ลิงก์ตัวอย่าง https://docs.google.com/... หรือ drive.google.com/..."
+                              className="w-full px-3 py-1.5 border border-sky-300 rounded-lg text-xs bg-white font-mono text-slate-800"
+                            />
+                          </div>
+                        </div>
                       </div>
                     )}
                   </div>
@@ -1202,6 +1283,40 @@ export const DeadlineManagerModal: React.FC<DeadlineManagerModalProps> = ({
                                 <span className="text-[10px] text-indigo-600 font-bold ml-0.5">+ กำหนด Dropdown</span>
                               </button>
                             )}
+                            {/* Sample documents indicator */}
+                            {dl.sample_url || (dl.example_documents && dl.example_documents.length > 0) ? (
+                              <a
+                                href={
+                                  /^https?:\/\//i.test(dl.sample_url || '')
+                                    ? dl.sample_url
+                                    : dl.example_documents?.[0]?.url
+                                    ? dl.example_documents[0].url.startsWith('http')
+                                      ? dl.example_documents[0].url
+                                      : `https://${dl.example_documents[0].url}`
+                                    : '#'
+                                }
+                                target="_blank"
+                                rel="noreferrer"
+                                className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-xs font-bold bg-sky-50 text-sky-800 border border-sky-300 hover:bg-sky-100 transition-colors"
+                                title="คลิกเพื่อเปิดดูเอกสารตัวอย่างของประเภทนี้"
+                              >
+                                <LinkIcon className="w-3 h-3 text-sky-600" />
+                                <span>มีลิงก์ตัวอย่าง ({(dl.sample_url ? 1 : 0) + (dl.example_documents?.length || 0)})</span>
+                                <ExternalLink className="w-2.5 h-2.5 text-sky-500 ml-0.5" />
+                              </a>
+                            ) : (
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  setEditingDeadlineId(dl.id);
+                                }}
+                                className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-xs font-medium text-slate-500 hover:text-sky-700 hover:bg-sky-50 border border-dashed border-slate-300 transition-colors cursor-pointer"
+                                title="คลิกเพื่อแปะลิงก์ตัวอย่างเอกสารสำหรับประเภทนี้"
+                              >
+                                <LinkIcon className="w-3 h-3 text-slate-400" />
+                                <span>+ แปะลิงก์ตัวอย่าง</span>
+                              </button>
+                            )}
                           </div>
 
                           {dl.description && (
@@ -1273,6 +1388,41 @@ export const DeadlineManagerModal: React.FC<DeadlineManagerModalProps> = ({
                                     }
                                     className="px-2.5 py-1.5 border border-rose-300 rounded-lg text-xs bg-white font-bold text-rose-900"
                                   />
+                                </div>
+                              </div>
+
+                              {/* Sample Document Links in edit mode */}
+                              <div className="sm:col-span-2 p-3.5 bg-sky-50/80 rounded-xl border border-sky-300 space-y-2">
+                                <div className="flex items-center justify-between">
+                                  <span className="text-xs font-bold text-sky-950 flex items-center gap-1.5">
+                                    <LinkIcon className="w-3.5 h-3.5 text-sky-600" />
+                                    <span>แปะลิงก์เอกสารตัวอย่าง / แบบฟอร์มต้นแบบ (เผื่อครูอยากดูตัวอย่าง)</span>
+                                  </span>
+                                  <span className="text-[10px] text-sky-700 font-medium">Google Docs, Drive หรือ PDF</span>
+                                </div>
+                                <div className="grid grid-cols-1 sm:grid-cols-12 gap-2 text-xs">
+                                  <div className="sm:col-span-5">
+                                    <input
+                                      type="text"
+                                      value={dl.sample_title || ''}
+                                      onChange={(e) =>
+                                        handleUpdateDeadlineItem(dl.id, { sample_title: e.target.value })
+                                      }
+                                      placeholder="ชื่อตัวอย่าง เช่น แบบฟอร์มวิจัย (Google Docs)"
+                                      className="w-full px-2.5 py-1.5 border border-sky-300 rounded-lg text-xs bg-white text-slate-800"
+                                    />
+                                  </div>
+                                  <div className="sm:col-span-7">
+                                    <input
+                                      type="url"
+                                      value={dl.sample_url || ''}
+                                      onChange={(e) =>
+                                        handleUpdateDeadlineItem(dl.id, { sample_url: e.target.value })
+                                      }
+                                      placeholder="https://docs.google.com/... หรือ drive.google.com/..."
+                                      className="w-full px-2.5 py-1.5 border border-sky-300 rounded-lg text-xs bg-white font-mono text-slate-800"
+                                    />
+                                  </div>
                                 </div>
                               </div>
 
@@ -1353,6 +1503,15 @@ export const DeadlineManagerModal: React.FC<DeadlineManagerModalProps> = ({
 
                         {/* Action buttons */}
                         <div className="flex sm:flex-col items-center gap-1.5 shrink-0 self-end sm:self-start">
+                          <button
+                            type="button"
+                            onClick={() => setBroadcastConfig(dl)}
+                            className="px-3 py-1.5 rounded-xl text-xs font-bold bg-amber-500 hover:bg-amber-400 text-slate-950 border border-amber-400 flex items-center gap-1.5 cursor-pointer transition-all shadow-2xs active:scale-95"
+                            title="ส่งอีเมลแจ้งเตือนภาระงานนี้ให้ครูทุกคนทันที"
+                          >
+                            <Mail className="w-3.5 h-3.5" />
+                            <span>ส่งเมลแจ้งเตือน</span>
+                          </button>
                           <button
                             type="button"
                             onClick={() =>
@@ -1442,6 +1601,12 @@ export const DeadlineManagerModal: React.FC<DeadlineManagerModalProps> = ({
                             }
                             availableTemplates={deadlines}
                             currentTeacher={currentTeacher}
+                            sampleUrl={dl.sample_url || ''}
+                            sampleTitle={dl.sample_title || ''}
+                            exampleDocuments={dl.example_documents || []}
+                            onSampleDocumentsChange={(sampleData) =>
+                              handleUpdateDeadlineItem(dl.id, sampleData)
+                            }
                           />
                         </div>
                       )}
@@ -1918,6 +2083,159 @@ export const DeadlineManagerModal: React.FC<DeadlineManagerModalProps> = ({
               >
                 นำเข้าข้อมูลทันที
               </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Broadcast Email Modal */}
+      {broadcastConfig && (
+        <div className="fixed inset-0 z-70 flex items-center justify-center bg-slate-900/75 p-3 sm:p-4 backdrop-blur-xs">
+          <div className="bg-white w-full max-w-xl rounded-3xl shadow-2xl border border-slate-200 overflow-hidden animate-in fade-in zoom-in-95 duration-150 flex flex-col max-h-[92vh]">
+            <div className="bg-gradient-to-r from-[#0B1329] via-indigo-950 to-slate-900 p-4 sm:p-5 text-white flex items-center justify-between shrink-0">
+              <div className="flex items-center gap-2.5 min-w-0">
+                <div className="w-10 h-10 rounded-2xl bg-amber-400/20 flex items-center justify-center text-amber-400 border border-amber-400/30 shrink-0">
+                  <Mail className="w-5 h-5" />
+                </div>
+                <div className="min-w-0">
+                  <span className="text-[10px] uppercase font-bold text-amber-300 tracking-wider block">
+                    Email Broadcast Announcement
+                  </span>
+                  <h3 className="font-extrabold text-base truncate">
+                    ส่งอีเมลแจ้งเตือนภาระงานใหม่ให้ครูทุกคน
+                  </h3>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => setBroadcastConfig(null)}
+                className="p-1.5 text-white/80 hover:text-white bg-white/10 rounded-full cursor-pointer"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            <div className="p-4 sm:p-6 overflow-y-auto space-y-4 text-xs">
+              {/* Task summary */}
+              <div className="p-3.5 bg-amber-50/70 border border-amber-300 rounded-2xl space-y-1.5">
+                <div className="flex items-center justify-between">
+                  <span className="text-amber-900 font-bold text-sm">{broadcastConfig.name}</span>
+                  <span className="font-mono bg-amber-200 px-2 py-0.5 rounded text-[10px] font-bold text-amber-950">
+                    ภาค {broadcastConfig.semester}/{broadcastConfig.academic_year}
+                  </span>
+                </div>
+                <div className="text-slate-600 flex items-center gap-1.5">
+                  <Clock className="w-3.5 h-3.5 text-amber-600" />
+                  <span>กำหนดส่ง: <strong className="text-slate-800">{formatThaiDateTime(`${broadcastConfig.end_date} ${broadcastConfig.end_time || '23:59'}`)}</strong></span>
+                </div>
+              </div>
+
+              {/* Recipients info */}
+              <div className="bg-slate-50 p-3 rounded-xl border border-slate-200 flex items-center justify-between">
+                <div>
+                  <span className="font-bold text-slate-700 block">ผู้รับอีเมล:</span>
+                  <span className="text-slate-500 text-[11px]">ครูผู้สอนทั้งหมด {teacherEmails.length} ท่าน (@pcshsksn.ac.th)</span>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => {
+                    navigator.clipboard.writeText(teacherEmails.join(', '));
+                    setBroadcastCopied(true);
+                    setTimeout(() => setBroadcastCopied(false), 2000);
+                  }}
+                  className="px-2.5 py-1 bg-white hover:bg-slate-100 border border-slate-300 text-slate-700 rounded-lg text-xs font-semibold flex items-center gap-1 cursor-pointer"
+                >
+                  {broadcastCopied ? <Check className="w-3.5 h-3.5 text-emerald-600" /> : <Copy className="w-3.5 h-3.5 text-slate-500" />}
+                  <span>คัดลอกอีเมล {teacherEmails.length} รายการ</span>
+                </button>
+              </div>
+
+              {/* Message preview */}
+              <div>
+                <label className="block font-bold text-slate-700 mb-1">
+                  ตัวอย่างข้อความแจ้งเตือนทางอีเมล:
+                </label>
+                <div className="bg-slate-900 text-slate-100 p-3.5 rounded-2xl font-sans text-xs leading-relaxed space-y-2 select-all border border-slate-800">
+                  <div className="text-amber-300 font-bold border-b border-slate-800 pb-1">
+                    หัวข้อ: [แจ้งภาระงานใหม่] {broadcastConfig.name} - กำหนดส่ง {formatThaiDateTime(`${broadcastConfig.end_date} ${broadcastConfig.end_time || '23:59'}`)} (จ.ภ. กาฬสินธุ์)
+                  </div>
+                  <p>เรียน คุณครูทุกท่าน โรงเรียนวิทยาศาสตร์จุฬาภรณราชวิทยาลัย กาฬสินธุ์</p>
+                  <p>ฝ่ายบริหารงานวิชาการขอแจ้งมอบหมายภาระงานและกำหนดส่งเอกสารใหม่ในระบบส่งเอกสารวิชาการออนไลน์:</p>
+                  <p className="text-amber-200">
+                    📌 ภาระงาน: {broadcastConfig.name}<br />
+                    📅 ภาคเรียนที่ {broadcastConfig.semester} ปีการศึกษา {broadcastConfig.academic_year}<br />
+                    ⏰ กำหนดส่ง: {formatThaiDateTime(`${broadcastConfig.end_date} ${broadcastConfig.end_time || '23:59'}`)}
+                    {broadcastConfig.description ? <><br />📝 รายละเอียด: {broadcastConfig.description}</> : null}
+                    {broadcastConfig.sample_url ? <><br />📎 เอกสารตัวอย่าง: {broadcastConfig.sample_url}</> : null}
+                  </p>
+                  <p>🔗 เข้าสู่ระบบเพื่อดำเนินการส่งเอกสาร: {typeof window !== 'undefined' ? window.location.origin : ''}</p>
+                  <p className="text-slate-400 text-[11px] pt-1 border-t border-slate-800">
+                    จึงเรียนมาเพื่อโปรดทราบและดำเนินการตามกำหนดเวลา<br />
+                    กลุ่มบริหารวิชาการ โรงเรียนวิทยาศาสตร์จุฬาภรณราชวิทยาลัย กาฬสินธุ์
+                  </p>
+                </div>
+              </div>
+
+              {broadcastSuccessMsg && (
+                <div className="p-3.5 bg-emerald-50 border border-emerald-300 rounded-2xl text-emerald-900 text-xs font-bold flex items-center gap-2 animate-in fade-in">
+                  <CheckCircle2 className="w-5 h-5 text-emerald-600 shrink-0" />
+                  <span>{broadcastSuccessMsg}</span>
+                </div>
+              )}
+            </div>
+
+            <div className="p-4 bg-slate-50 border-t border-slate-200 flex flex-wrap items-center justify-between gap-2 shrink-0">
+              <button
+                type="button"
+                onClick={() => setBroadcastConfig(null)}
+                className="px-4 py-2 text-slate-600 hover:bg-slate-200 rounded-xl font-bold cursor-pointer"
+              >
+                ปิดหน้าต่าง
+              </button>
+
+              <div className="flex flex-wrap items-center gap-2">
+                <button
+                  type="button"
+                  onClick={() => {
+                    const deadlineFormatted = formatThaiDateTime(`${broadcastConfig.end_date} ${broadcastConfig.end_time || '23:59'}`);
+                    const subject = `[แจ้งภาระงานใหม่] ${broadcastConfig.name} - กำหนดส่ง ${deadlineFormatted} (จ.ภ. กาฬสินธุ์)`;
+                    const body = `เรียน คุณครูทุกท่าน โรงเรียนวิทยาศาสตร์จุฬาภรณราชวิทยาลัย กาฬสินธุ์\n\nฝ่ายบริหารงานวิชาการขอแจ้งมอบหมายภาระงานและกำหนดส่งเอกสารใหม่ในระบบส่งเอกสารวิชาการออนไลน์:\n\n📌 ภาระงาน: ${broadcastConfig.name}\n📅 ภาคเรียนที่ ${broadcastConfig.semester} ปีการศึกษา ${broadcastConfig.academic_year}\n⏰ กำหนดส่ง: ${deadlineFormatted}\n${broadcastConfig.description ? `📝 รายละเอียด: ${broadcastConfig.description}\n` : ''}${broadcastConfig.sample_url ? `📎 เอกสารตัวอย่าง: ${broadcastConfig.sample_url}\n` : ''}\n🔗 เข้าสู่ระบบเพื่อดำเนินการส่งเอกสาร: ${window.location.origin}\n\nจึงเรียนมาเพื่อโปรดทราบและดำเนินการตามกำหนดเวลา\nกลุ่มบริหารวิชาการ โรงเรียนวิทยาศาสตร์จุฬาภรณราชวิทยาลัย กาฬสินธุ์`;
+                    navigator.clipboard.writeText(body);
+                    setBroadcastCopied(true);
+                    setTimeout(() => setBroadcastCopied(false), 2000);
+                  }}
+                  className="px-3 py-2 bg-white hover:bg-slate-100 border border-slate-300 text-slate-800 rounded-xl font-bold flex items-center gap-1.5 cursor-pointer text-xs"
+                >
+                  <Copy className="w-3.5 h-3.5 text-slate-500" />
+                  <span>คัดลอกข้อความ</span>
+                </button>
+
+                {/* 1-Click Gmail Broadcast Button */}
+                <button
+                  type="button"
+                  onClick={() => {
+                    if (!broadcastConfig) return;
+                    const deadlineFormatted = formatThaiDateTime(`${broadcastConfig.end_date} ${broadcastConfig.end_time || '23:59'}`);
+                    const subject = `[แจ้งภาระงานใหม่] ${broadcastConfig.name} - กำหนดส่ง ${deadlineFormatted} (จ.ภ. กาฬสินธุ์)`;
+                    const body = `เรียน คุณครูทุกท่าน โรงเรียนวิทยาศาสตร์จุฬาภรณราชวิทยาลัย กาฬสินธุ์\n\nฝ่ายบริหารงานวิชาการขอแจ้งมอบหมายภาระงานและกำหนดส่งเอกสารใหม่ในระบบส่งเอกสารวิชาการออนไลน์:\n\n📌 ภาระงาน: ${broadcastConfig.name}\n📅 ภาคเรียนที่ ${broadcastConfig.semester} ปีการศึกษา ${broadcastConfig.academic_year}\n⏰ กำหนดส่ง: ${deadlineFormatted}\n${broadcastConfig.description ? `📝 รายละเอียด: ${broadcastConfig.description}\n` : ''}${broadcastConfig.sample_url ? `📎 เอกสารตัวอย่าง: ${broadcastConfig.sample_url}\n` : ''}\n🔗 เข้าสู่ระบบเพื่อดำเนินการส่งเอกสาร: ${window.location.origin}\n\nจึงเรียนมาเพื่อโปรดทราบและดำเนินการตามกำหนดเวลา\nกลุ่มบริหารวิชาการ โรงเรียนวิทยาศาสตร์จุฬาภรณราชวิทยาลัย กาฬสินธุ์`;
+
+                    openGmailComposeTab({
+                      to: teacherEmails.join(','),
+                      subject,
+                      body,
+                    });
+                    setBroadcastSuccessMsg(`⚡ เปิด Gmail พร้อมส่งแจ้งเตือนถึงคุณครูทั้ง ${teacherEmails.length} ท่านแล้ว!`);
+                    setTimeout(() => {
+                      setBroadcastSuccessMsg(null);
+                      setBroadcastConfig(null);
+                    }, 2500);
+                  }}
+                  className="px-4 py-2 bg-gradient-to-r from-amber-500 to-amber-600 hover:from-amber-600 hover:to-amber-700 text-slate-950 rounded-xl font-black flex items-center gap-1.5 shadow-md active:scale-95 transition-all cursor-pointer text-xs"
+                >
+                  <Zap className="w-4 h-4 text-slate-950" />
+                  <span>⚡ เปิดส่งใน Gmail ถึงครูทุกคน ({teacherEmails.length} ท่าน)</span>
+                </button>
+              </div>
             </div>
           </div>
         </div>

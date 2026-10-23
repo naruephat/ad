@@ -104,7 +104,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
             <div className="min-w-0">
               <div className="flex items-center gap-1.5">
                 <span className="font-extrabold text-white text-sm tracking-tight truncate">
-                  ส่งแผนการสอน
+                  ส่งเอกสารวิชาการ
                 </span>
                 <span className="px-1.5 py-0.5 rounded text-[9px] font-black bg-gradient-to-r from-amber-400 to-amber-500 text-slate-950 shadow-xs shrink-0">
                   จ.ภ.
@@ -203,7 +203,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
               )}
             </button>
 
-            {/* แผนการสอนทั้งหมด */}
+            {/* เอกสารทั้งหมด */}
             <button
               onClick={() =>
                 handleNavClick(() => {
@@ -220,7 +220,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
               <div className="flex items-center gap-2.5 min-w-0">
                 <FileText className="w-4 h-4 text-slate-400 group-hover:text-white shrink-0" />
                 <span className="truncate font-medium">
-                  {isAdmin ? 'รายการแผนทั้งหมด' : 'แผนของฉัน'}
+                  {isAdmin ? 'เอกสารทั้งหมด' : 'เอกสารของฉัน'}
                 </span>
               </div>
               <span className="text-[10px] font-mono text-slate-400 bg-slate-800/90 px-1.5 py-0.5 rounded shrink-0 border border-slate-700/60">
@@ -347,14 +347,14 @@ export const Sidebar: React.FC<SidebarProps> = ({
                 </span>
               </button>
 
-              {/* ศูนย์ติดตามส่งแผนรายบุคคล */}
+              {/* ศูนย์ติดตามงานรายบุคคล */}
               <button
                 onClick={() => handleNavClick(onOpenAdminTrackerModal)}
                 className="w-full flex items-center justify-between px-3 py-2 rounded-xl text-slate-300 hover:text-white hover:bg-slate-800/80 transition-all cursor-pointer group"
               >
                 <div className="flex items-center gap-2.5 min-w-0">
                   <ClipboardList className="w-4 h-4 text-slate-400 group-hover:text-amber-400 shrink-0 transition-colors" />
-                  <span className="truncate font-medium">ติดตามส่งแผนรายบุคคล</span>
+                  <span className="truncate font-medium">ติดตามงานรายบุคคล</span>
                 </div>
                 <ChevronRight className="w-3.5 h-3.5 text-slate-500 group-hover:text-amber-400 group-hover:translate-x-0.5 transition-all shrink-0" />
               </button>

@@ -72,7 +72,7 @@ export const Navbar: React.FC<NavbarProps> = ({
             <div className="min-w-0">
               <div className="flex items-center gap-1.5 sm:gap-2">
                 <h1 className="text-sm sm:text-base md:text-lg font-bold text-slate-900 tracking-tight leading-tight truncate">
-                  ระบบส่งแผนการสอน
+                  ระบบส่งเอกสารวิชาการ
                 </h1>
                 <span className="hidden sm:inline-flex items-center px-2 py-0.5 rounded-md text-[10px] font-bold bg-amber-500/10 text-amber-900 border border-amber-400/30 shrink-0">
                   จ.ภ. กาฬสินธุ์
@@ -116,10 +116,10 @@ export const Navbar: React.FC<NavbarProps> = ({
                     <button
                       onClick={onOpenAdminTrackerModal}
                       className="inline-flex items-center gap-1.5 px-3 py-2 rounded-xl text-xs font-bold transition-all border border-slate-300 hover:border-slate-400 text-slate-800 hover:bg-slate-50 shadow-2xs cursor-pointer active:scale-95"
-                      title="ติดตามดูว่าใครส่งแผนแล้วบ้างแยกตามกลุ่มสาระ"
+                      title="ติดตามดูว่าใครยังไม่ส่งชิ้นงานไหนแยกตามภาระงานที่มอบหมาย"
                     >
                       <ClipboardList className="w-3.5 h-3.5 text-slate-600" />
-                      <span>ติดตามส่งแผน</span>
+                      <span>ติดตามงานรายบุคคล</span>
                     </button>
 
                     <button
